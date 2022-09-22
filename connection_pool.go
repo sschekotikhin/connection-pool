@@ -22,9 +22,9 @@ type ConnectionPool[T Connectable] interface {
 
 type Config[T Connectable] struct {
 	// Min number of connections that will be opened during New() function.
-	MinConns uint64
+	MinConns int
 	// Max number of opened connections.
-	MaxConns uint64
+	MaxConns int
 	// IDLE timeout for every connection.
 	IdleTimeout time.Duration
 	// Function for creating new connections.
@@ -43,8 +43,8 @@ type connectionPool[T Connectable] struct {
 	requestsMutex sync.RWMutex
 	requests      []chan connection[T]
 
-	minConns    uint64
-	maxConns    uint64
+	minConns    int
+	maxConns    int
 	idleTimeout time.Duration
 	factory     func() (T, error)
 
@@ -53,7 +53,9 @@ type connectionPool[T Connectable] struct {
 
 // Opens new connection pool.
 func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
-	if cfg.MaxConns == 0 {
+	if cfg.MinConns < 0 {
+		return nil, errors.New("min conns should be greater than or equal to 0")
+	} else if cfg.MaxConns <= 0 {
 		return nil, errors.New("max conns should be greater than 0")
 	} else if cfg.MinConns > cfg.MaxConns {
 		return nil, errors.New("min conns cant be greater than max conns")
@@ -101,8 +103,14 @@ func (cp *connectionPool[T]) Connection() (T, error) {
 			if !ok {
 				return *new(T), errors.New("connection already closed")
 			}
+
 			// closing expired connection
-			if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) {
+			cp.connsMutex.RLock()
+			connsLen := len(cp.conns)
+			cp.connsMutex.RUnlock()
+			if cp.idleTimeout > 0 &&
+				conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) &&
+				connsLen > cp.minConns {
 				conn.conn.Close()
 				continue
 			}
@@ -129,7 +137,12 @@ func (cp *connectionPool[T]) Connection() (T, error) {
 				}
 
 				// closing expired connection
-				if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) {
+				cp.connsMutex.RLock()
+				connsLen := len(cp.conns)
+				cp.connsMutex.RUnlock()
+				if cp.idleTimeout > 0 &&
+					conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) &&
+					connsLen > cp.minConns {
 					conn.conn.Close()
 					continue
 				}
