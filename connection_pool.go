@@ -3,6 +3,7 @@ package connectionpool
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 type Connectable interface {
@@ -24,17 +25,25 @@ type Config[T Connectable] struct {
 	MinConns uint64
 	// Max number of opened connections.
 	MaxConns uint64
+	// IDLE timeout for every connection.
+	IdleTimeout time.Duration
 	// Function for creating new connections.
 	Factory func() (T, error)
 }
 
+type connection[T Connectable] struct {
+	conn      T
+	timestamp time.Time
+}
+
 type connectionPool[T Connectable] struct {
 	mutex sync.RWMutex
-	conns chan T
+	conns chan connection[T]
 
-	minConns uint64
-	maxConns uint64
-	factory  func() (T, error)
+	minConns    uint64
+	maxConns    uint64
+	idleTimeout time.Duration
+	factory     func() (T, error)
 
 	closed bool
 }
@@ -51,21 +60,26 @@ func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
 	}
 
 	pool := &connectionPool[T]{
-		mutex:    sync.RWMutex{},
-		maxConns: cfg.MaxConns,
-		minConns: cfg.MinConns,
-		factory:  cfg.Factory,
-		closed:   false,
+		mutex:       sync.RWMutex{},
+		maxConns:    cfg.MaxConns,
+		minConns:    cfg.MinConns,
+		idleTimeout: cfg.IdleTimeout,
+		factory:     cfg.Factory,
+		closed:      false,
 	}
 
-	conns := make(chan T, cfg.MaxConns)
+	conns := make(chan connection[T], cfg.MaxConns)
 	for i := 0; i < int(cfg.MinConns); i++ {
 		conn, err := pool.factory()
 		if err != nil {
+			pool.Close()
 			return nil, err
 		}
 
-		conns <- conn
+		conns <- connection[T]{
+			conn:      conn,
+			timestamp: time.Now(),
+		}
 	}
 	pool.conns = conns
 
@@ -76,20 +90,33 @@ func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
 func (cp *connectionPool[T]) Connection() (T, error) {
 	conns := cp.getConns()
 
-	select {
-	case conn, ok := <-conns:
-		if !ok {
-			return *new(T), errors.New("connection already closed")
-		}
+	for {
+		select {
+		case conn, ok := <-conns:
+			if !ok {
+				return *new(T), errors.New("connection already closed")
+			}
+			// closes expired connection
+			if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) {
+				conn.conn.Close()
+				continue
+			}
+			// closes unhealthy connection
+			if err := conn.conn.Ping(); err != nil {
+				conn.conn.Close()
+				continue
+			}
 
-		return conn, nil
-	default:
-		conn, err := cp.factory()
-		if err != nil {
-			return *new(T), err
-		}
+			return conn.conn, nil
+		default:
+			// TODO: request for new connection if limit exceeded
+			conn, err := cp.factory()
+			if err != nil {
+				return *new(T), err
+			}
 
-		return conn, nil
+			return conn, nil
+		}
 	}
 }
 
@@ -103,7 +130,7 @@ func (cp *connectionPool[T]) Put(conn T) error {
 	}
 
 	select {
-	case cp.conns <- conn:
+	case cp.conns <- connection[T]{conn: conn, timestamp: time.Now()}:
 		return nil
 	default:
 		return conn.Close()
@@ -128,13 +155,13 @@ func (cp *connectionPool[T]) Close() error {
 
 	var err error
 	for conn := range conns {
-		err = conn.Close()
+		err = conn.conn.Close()
 	}
 
 	return err
 }
 
-func (cp *connectionPool[T]) getConns() chan T {
+func (cp *connectionPool[T]) getConns() chan connection[T] {
 	cp.mutex.RLock()
 	conns := cp.conns
 	cp.mutex.RUnlock()
