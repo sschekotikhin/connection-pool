@@ -5,27 +5,31 @@ import (
 	"sync"
 )
 
-type Config struct {
-	MinConns uint64
-	MaxConns uint64
-	Factory  func() (Connection, error)
-}
-
-type ConnectionPool interface {
-	Connection() (Connection, error)
+type Closable interface {
 	Close() error
 }
 
-type connectionPool struct {
-	mutex sync.RWMutex
-	conns chan Connection
+type ConnectionPool[T Closable] interface {
+	Connection() (T, error)
+	Close() error
+}
 
-	cfg *Config
+type Config[T Closable] struct {
+	MinConns uint64
+	MaxConns uint64
+	Factory  func() (T, error)
+}
+
+type connectionPool[T Closable] struct {
+	mutex sync.RWMutex
+	conns chan T
+
+	cfg *Config[T]
 
 	closed bool
 }
 
-func New(cfg *Config) (ConnectionPool, error) {
+func New[T Closable](cfg *Config[T]) (ConnectionPool[T], error) {
 	if cfg.MaxConns == 0 {
 		return nil, errors.New("max conns should be greater than 0")
 	} else if cfg.MinConns > cfg.MaxConns {
@@ -35,13 +39,13 @@ func New(cfg *Config) (ConnectionPool, error) {
 		return nil, errors.New("factory cant be nil")
 	}
 
-	pool := &connectionPool{
+	pool := &connectionPool[T]{
 		mutex:  sync.RWMutex{},
 		cfg:    cfg,
 		closed: false,
 	}
 
-	conns := make(chan Connection, cfg.MaxConns)
+	conns := make(chan T, cfg.MaxConns)
 	for i := 0; i < int(cfg.MinConns); i++ {
 		conn, err := cfg.Factory()
 		if err != nil {
@@ -55,7 +59,7 @@ func New(cfg *Config) (ConnectionPool, error) {
 	return pool, nil
 }
 
-func (cp *connectionPool) Close() error {
+func (cp *connectionPool[T]) Close() error {
 	if cp.closed {
 		return nil
 	}
@@ -78,31 +82,27 @@ func (cp *connectionPool) Close() error {
 	return err
 }
 
-func (cp *connectionPool) Connection() (Connection, error) {
+func (cp *connectionPool[T]) Connection() (T, error) {
 	conns := cp.getConns()
 
 	select {
 	case conn, ok := <-conns:
-		if conn == nil || !ok {
-			return nil, errors.New("connection already closed")
+		if !ok {
+			return *new(T), errors.New("connection already closed")
 		}
 
 		return conn, nil
 	default:
 		conn, err := cp.cfg.Factory()
 		if err != nil {
-			return nil, err
+			return *new(T), err
 		}
 
 		return conn, nil
 	}
 }
 
-func (cp *connectionPool) Put(conn Connection) error {
-	if conn == nil {
-		return errors.New("connection is nil")
-	}
-
+func (cp *connectionPool[T]) Put(conn T) error {
 	cp.mutex.RLock()
 	defer cp.mutex.RUnlock()
 
@@ -118,7 +118,7 @@ func (cp *connectionPool) Put(conn Connection) error {
 	}
 }
 
-func (cp *connectionPool) getConns() chan Connection {
+func (cp *connectionPool[T]) getConns() chan T {
 	cp.mutex.RLock()
 	conns := cp.conns
 	cp.mutex.RUnlock()
