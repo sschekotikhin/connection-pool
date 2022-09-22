@@ -12,6 +12,8 @@ type Connectable interface {
 }
 
 type ConnectionPool[T Connectable] interface {
+	// Returns number of opened connections.
+	Len() int
 	// Retrieves connection from pool if it exists or opens new connection.
 	Connection() (T, error)
 	// Returns connection to pool.
@@ -218,6 +220,19 @@ func (cp *connectionPool[T]) Close() error {
 	}
 
 	return err
+}
+
+// Returns number of opened connections.
+func (cp *connectionPool[T]) Len() int {
+	cp.connsMutex.RLock()
+	conns := cp.conns
+	cp.connsMutex.RUnlock()
+
+	if conns == nil {
+		return 0
+	}
+
+	return len(conns)
 }
 
 func (cp *connectionPool[T]) getConns() chan connection[T] {
