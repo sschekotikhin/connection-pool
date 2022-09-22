@@ -5,11 +5,12 @@ import (
 	"sync"
 )
 
-type Closable interface {
+type Connectable interface {
+	Ping() error
 	Close() error
 }
 
-type ConnectionPool[T Closable] interface {
+type ConnectionPool[T Connectable] interface {
 	// Retrieves connection from pool if it exists or opens new connection.
 	Connection() (T, error)
 	// Returns connection to pool.
@@ -18,14 +19,16 @@ type ConnectionPool[T Closable] interface {
 	Close() error
 }
 
-type Config struct {
+type Config[T Connectable] struct {
 	// Min number of connections that will be opened during New() function.
 	MinConns uint64
 	// Max number of opened connections.
 	MaxConns uint64
+	// Function for creating new connections.
+	Factory func() (T, error)
 }
 
-type connectionPool[T Closable] struct {
+type connectionPool[T Connectable] struct {
 	mutex sync.RWMutex
 	conns chan T
 
@@ -37,13 +40,13 @@ type connectionPool[T Closable] struct {
 }
 
 // Opens new connection pool.
-func New[T Closable](cfg *Config, factory func() (T, error)) (ConnectionPool[T], error) {
+func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
 	if cfg.MaxConns == 0 {
 		return nil, errors.New("max conns should be greater than 0")
 	} else if cfg.MinConns > cfg.MaxConns {
 		return nil, errors.New("min conns cant be greater than max conns")
 	}
-	if factory == nil {
+	if cfg.Factory == nil {
 		return nil, errors.New("factory cant be nil")
 	}
 
@@ -51,7 +54,7 @@ func New[T Closable](cfg *Config, factory func() (T, error)) (ConnectionPool[T],
 		mutex:    sync.RWMutex{},
 		maxConns: cfg.MaxConns,
 		minConns: cfg.MinConns,
-		factory:  factory,
+		factory:  cfg.Factory,
 		closed:   false,
 	}
 
