@@ -1,7 +1,5 @@
 # connection-pool
 
----
-
 Universal connection pool on generics.
 
 #### Feature:
@@ -11,9 +9,7 @@ Universal connection pool on generics.
 - Support user setting ping method, used to check the connectivity of connection, invalid connection will be discarded.
 - Support connection waiting, When the connection pool is full, support for connection waiting.
 
----
-
-#### Install and usage:
+#### Install
 
 ```
 go get github.com/sschekotikhin/connection-pool
@@ -56,18 +52,16 @@ func main() {
 	}
 	defer pool.Close()
 
-  // get connection from the pool
+        // get connection from the pool
 	conn, err := pool.Connection()
 	if err != nil {
 		log.Fatal(err)
 	}
 	// do something with received connection
-  // return connection to the pool
+        // return connection to the pool
 	pool.Put(conn)
 }
 ```
-
----
 
 #### Remarks:
 
