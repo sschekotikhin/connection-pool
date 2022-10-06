@@ -128,6 +128,10 @@ func (cp *connectionPool[T]) Connection() (T, error) {
 			if len(cp.conns) >= int(cp.maxConns) {
 				// creating new request
 				cp.requestsMutex.Lock()
+				if cp.requests == nil {
+					cp.requestsMutex.Unlock()
+					return *new(T), errors.New("connection already closed")
+				}
 				request := make(chan connection[T], 1)
 				cp.requests = append(cp.requests, request)
 				cp.requestsMutex.Unlock()
@@ -214,9 +218,21 @@ func (cp *connectionPool[T]) Close() error {
 		return nil
 	}
 
+	close(conns)
 	var err error
 	for conn := range conns {
 		err = conn.conn.Close()
+	}
+
+	cp.requestsMutex.Lock()
+	requests := cp.requests
+	cp.requests = nil
+	cp.requestsMutex.Unlock()
+
+	for _, request := range requests {
+		if request != nil {
+			close(request)
+		}
 	}
 
 	return err
