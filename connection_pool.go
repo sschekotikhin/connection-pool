@@ -200,7 +200,11 @@ func (cp *connectionPool[T]) Put(conn T) error {
 
 // Closes all connections and pool.
 func (cp *connectionPool[T]) Close() error {
-	if cp.closed {
+	cp.connsMutex.RLock()
+	closed := cp.closed
+	cp.connsMutex.RUnlock()
+
+	if closed {
 		return nil
 	}
 
