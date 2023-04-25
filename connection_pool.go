@@ -119,7 +119,6 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 				// closing old connection
 				if cp.maxLifeTime > 0 {
 					if timestamp, ok := timestamps[conn.conn]; ok && timestamp.Add(cp.maxLifeTime).Before(now) {
-						(*conn.conn).Close()
 						cp.freeConn(conn.conn)
 
 						continue
@@ -127,7 +126,6 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 				}
 				// closing expired connection
 				if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(now) {
-					(*conn.conn).Close()
 					cp.freeConn(conn.conn)
 
 					continue
@@ -135,7 +133,6 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 			}
 			// closing unhealthy connection
 			if err := (*conn.conn).Ping(); err != nil {
-				(*conn.conn).Close()
 				cp.freeConn(conn.conn)
 
 				continue
@@ -173,7 +170,6 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 					// closing old connection
 					if cp.maxLifeTime > 0 {
 						if timestamp, ok := timestamps[conn.conn]; ok && timestamp.Add(cp.maxLifeTime).Before(now) {
-							(*conn.conn).Close()
 							cp.freeConn(conn.conn)
 
 							continue
@@ -181,7 +177,6 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 					}
 					// closing expired connection
 					if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(now) {
-						(*conn.conn).Close()
 						cp.freeConn(conn.conn)
 
 						continue
@@ -189,7 +184,6 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 				}
 				// closing unhealthy connection
 				if err := (*conn.conn).Ping(); err != nil {
-					(*conn.conn).Close()
 					cp.freeConn(conn.conn)
 
 					continue
@@ -322,5 +316,6 @@ func (cp *connectionPool[T]) freeConn(conn *T) {
 	cp.connsMutex.Lock()
 	defer cp.connsMutex.Unlock()
 
+	(*conn).Close()
 	delete(cp.timestamps, conn)
 }
