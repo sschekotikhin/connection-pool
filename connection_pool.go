@@ -104,7 +104,7 @@ func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
 
 // Retrieves connection from the pool if it exists or opens new connection.
 func (cp *connectionPool[T]) Connection() (*T, error) {
-	conns := cp.getConns()
+	conns, timestamps := cp.getConns()
 
 	for {
 		select {
@@ -113,28 +113,31 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 				return new(T), errors.New("connection already closed")
 			}
 
-			cp.connsMutex.RLock()
-			connsLen := len(cp.conns)
-			timestamp := cp.timestamps[conn.conn]
-			cp.connsMutex.RUnlock()
-
-			if (cp.maxLifeTime > 0 || cp.idleTimeout > 0) && connsLen > cp.minConns {
+			if (cp.maxLifeTime > 0 || cp.idleTimeout > 0) && len(conns) > cp.minConns {
 				now := time.Now()
 
 				// closing old connection
-				if cp.maxLifeTime > 0 && timestamp.Add(cp.maxLifeTime).Before(now) {
-					(*conn.conn).Close()
-					continue
+				if cp.maxLifeTime > 0 {
+					if timestamp, ok := timestamps[conn.conn]; ok && timestamp.Add(cp.maxLifeTime).Before(now) {
+						(*conn.conn).Close()
+						cp.freeConn(conn.conn)
+
+						continue
+					}
 				}
 				// closing expired connection
 				if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(now) {
 					(*conn.conn).Close()
+					cp.freeConn(conn.conn)
+
 					continue
 				}
 			}
 			// closing unhealthy connection
 			if err := (*conn.conn).Ping(); err != nil {
 				(*conn.conn).Close()
+				cp.freeConn(conn.conn)
+
 				continue
 			}
 
@@ -146,6 +149,7 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 				cp.requestsMutex.Lock()
 				if cp.requests == nil {
 					cp.requestsMutex.Unlock()
+
 					return new(T), errors.New("connection already closed")
 				}
 				request := make(chan connection[T], 1)
@@ -160,26 +164,34 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 
 				cp.connsMutex.RLock()
 				connsLen := len(cp.conns)
-				timestamp := cp.timestamps[conn.conn]
+				timestamps := cp.timestamps
 				cp.connsMutex.RUnlock()
 
 				if (cp.maxLifeTime > 0 || cp.idleTimeout > 0) && connsLen > cp.minConns {
 					now := time.Now()
 
 					// closing old connection
-					if cp.maxLifeTime > 0 && timestamp.Add(cp.maxLifeTime).Before(now) {
-						(*conn.conn).Close()
-						continue
+					if cp.maxLifeTime > 0 {
+						if timestamp, ok := timestamps[conn.conn]; ok && timestamp.Add(cp.maxLifeTime).Before(now) {
+							(*conn.conn).Close()
+							cp.freeConn(conn.conn)
+
+							continue
+						}
 					}
 					// closing expired connection
 					if cp.idleTimeout > 0 && conn.timestamp.Add(cp.idleTimeout).Before(now) {
 						(*conn.conn).Close()
+						cp.freeConn(conn.conn)
+
 						continue
 					}
 				}
 				// closing unhealthy connection
 				if err := (*conn.conn).Ping(); err != nil {
 					(*conn.conn).Close()
+					cp.freeConn(conn.conn)
+
 					continue
 				}
 
@@ -194,7 +206,9 @@ func (cp *connectionPool[T]) Connection() (*T, error) {
 			if err != nil {
 				return new(T), err
 			}
-			cp.timestamps[&conn] = time.Now()
+			if cp.timestamps != nil {
+				cp.timestamps[&conn] = time.Now()
+			}
 
 			return &conn, nil
 		}
@@ -207,6 +221,8 @@ func (cp *connectionPool[T]) Put(conn *T) error {
 	defer cp.connsMutex.Unlock()
 
 	if cp.conns == nil {
+		delete(cp.timestamps, conn)
+
 		return (*conn).Close()
 	}
 
@@ -220,7 +236,9 @@ func (cp *connectionPool[T]) Put(conn *T) error {
 
 		now := time.Now()
 		request <- connection[T]{conn: conn, timestamp: now}
-		cp.timestamps[conn] = now
+		if cp.timestamps != nil {
+			cp.timestamps[conn] = now
+		}
 
 		return nil
 	}
@@ -229,10 +247,14 @@ func (cp *connectionPool[T]) Put(conn *T) error {
 
 	select {
 	case cp.conns <- connection[T]{conn: conn, timestamp: now}:
-		cp.timestamps[conn] = now
+		if cp.timestamps != nil {
+			cp.timestamps[conn] = now
+		}
 
 		return nil
 	default:
+		delete(cp.timestamps, conn)
+
 		return (*conn).Close()
 	}
 }
@@ -287,10 +309,18 @@ func (cp *connectionPool[T]) Len() int {
 	return len(conns)
 }
 
-func (cp *connectionPool[T]) getConns() chan connection[T] {
+func (cp *connectionPool[T]) getConns() (chan connection[T], map[*T]time.Time) {
 	cp.connsMutex.RLock()
 	conns := cp.conns
+	timestamps := cp.timestamps
 	cp.connsMutex.RUnlock()
 
-	return conns
+	return conns, timestamps
+}
+
+func (cp *connectionPool[T]) freeConn(conn *T) {
+	cp.connsMutex.Lock()
+	defer cp.connsMutex.Unlock()
+
+	delete(cp.timestamps, conn)
 }
