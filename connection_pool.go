@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+var (
+	errMinConnsShouldNotBeNegative = errors.New("min conns should be greater than or equal to 0")
+	errMaxConnsShouldBePositive    = errors.New("max conns should be greater than 0")
+	errMinIsGreaterThanMax         = errors.New("min conns should be lower than or equal to max conns")
+	errNilFactory                  = errors.New("factory cant be nil")
+	errPoolAlreadyClosed           = errors.New("connection pool already closed")
+	errMaxConnLimitExceeded        = errors.New("max active connections limit exceeded")
+)
+
 type Connectable interface {
 	Ping() error
 	Close() error
@@ -56,15 +65,15 @@ type connectionPool[T Connectable] struct {
 
 // Opens new connection pool.
 func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
-	if cfg.MinConns < 0 {
-		return nil, errors.New("min conns should be greater than or equal to 0")
-	} else if cfg.MaxConns <= 0 {
-		return nil, errors.New("max conns should be greater than 0")
-	} else if cfg.MinConns > cfg.MaxConns {
-		return nil, errors.New("min conns cant be greater than max conns")
-	}
-	if cfg.Factory == nil {
-		return nil, errors.New("factory cant be nil")
+	switch {
+	case cfg.MinConns < 0:
+		return nil, errMinConnsShouldNotBeNegative
+	case cfg.MaxConns <= 0:
+		return nil, errMaxConnsShouldBePositive
+	case cfg.MinConns > cfg.MaxConns:
+		return nil, errMinIsGreaterThanMax
+	case cfg.Factory == nil:
+		return nil, errNilFactory
 	}
 
 	pool := &connectionPool[T]{
@@ -79,10 +88,11 @@ func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
 	}
 
 	conns := make(chan connection[T], cfg.MaxConns)
-	for i := 0; i < int(cfg.MinConns); i++ {
+	for i := 0; i < cfg.MinConns; i++ {
 		conn, err := pool.factory()
 		if err != nil {
 			pool.Close()
+
 			return nil, err
 		}
 
@@ -106,7 +116,7 @@ func (cp *connectionPool[T]) Connection(ctx context.Context) (T, error) {
 			return *new(T), ctx.Err()
 		case conn, ok := <-conns:
 			if !ok {
-				return *new(T), errors.New("connection already closed")
+				return *new(T), errPoolAlreadyClosed
 			}
 
 			// closing expired connection
@@ -117,23 +127,26 @@ func (cp *connectionPool[T]) Connection(ctx context.Context) (T, error) {
 				conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) &&
 				connsLen > cp.minConns {
 				conn.conn.Close()
+
 				continue
 			}
 			// closing unhealthy connection
 			if err := conn.conn.Ping(); err != nil {
 				conn.conn.Close()
+
 				continue
 			}
 
 			return conn.conn, nil
 		default:
 			// max conns exceeded
-			if len(cp.conns) >= int(cp.maxConns) {
+			if len(cp.conns) >= cp.maxConns {
 				// creating new request
 				cp.requestsMutex.Lock()
 				if cp.requests == nil {
 					cp.requestsMutex.Unlock()
-					return *new(T), errors.New("connection pool already closed")
+
+					return *new(T), errPoolAlreadyClosed
 				}
 				request := make(chan connection[T], 1)
 				cp.requests = append(cp.requests, request)
@@ -146,7 +159,7 @@ func (cp *connectionPool[T]) Connection(ctx context.Context) (T, error) {
 					return *new(T), ctx.Err()
 				case c, ok := <-request:
 					if !ok {
-						return *new(T), errors.New("max active connections limit exceeded")
+						return *new(T), errMaxConnLimitExceeded
 					}
 					conn = c
 				}
@@ -159,11 +172,13 @@ func (cp *connectionPool[T]) Connection(ctx context.Context) (T, error) {
 					conn.timestamp.Add(cp.idleTimeout).Before(time.Now()) &&
 					connsLen > cp.minConns {
 					conn.conn.Close()
+
 					continue
 				}
 				// closing unhealthy connection
 				if err := conn.conn.Ping(); err != nil {
 					conn.conn.Close()
+
 					continue
 				}
 
@@ -216,6 +231,7 @@ func (cp *connectionPool[T]) Close() error {
 	cp.connsMutex.Lock()
 	if cp.closed {
 		cp.connsMutex.Unlock()
+
 		return nil
 	}
 	cp.closed = true
