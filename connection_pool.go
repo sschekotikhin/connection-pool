@@ -1,6 +1,7 @@
 package connectionpool
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -15,7 +16,7 @@ type ConnectionPool[T Connectable] interface {
 	// Returns number of opened connections.
 	Len() int
 	// Retrieves connection from pool if it exists or opens new connection.
-	Connection() (T, error)
+	Connection(ctx context.Context) (T, error)
 	// Returns connection to pool.
 	Put(conn T) error
 	// Closes all connections and pool.
@@ -96,11 +97,13 @@ func New[T Connectable](cfg *Config[T]) (ConnectionPool[T], error) {
 }
 
 // Retrieves connection from the pool if it exists or opens new connection.
-func (cp *connectionPool[T]) Connection() (T, error) {
+func (cp *connectionPool[T]) Connection(ctx context.Context) (T, error) {
 	conns := cp.getConns()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return *new(T), ctx.Err()
 		case conn, ok := <-conns:
 			if !ok {
 				return *new(T), errors.New("connection already closed")
@@ -130,16 +133,22 @@ func (cp *connectionPool[T]) Connection() (T, error) {
 				cp.requestsMutex.Lock()
 				if cp.requests == nil {
 					cp.requestsMutex.Unlock()
-					return *new(T), errors.New("connection already closed")
+					return *new(T), errors.New("connection pool already closed")
 				}
 				request := make(chan connection[T], 1)
 				cp.requests = append(cp.requests, request)
 				cp.requestsMutex.Unlock()
 
 				// waiting connection from Put()
-				conn, ok := <-request
-				if !ok {
-					return *new(T), errors.New("max active connections limit exceeded")
+				var conn connection[T]
+				select {
+				case <-ctx.Done():
+					return *new(T), ctx.Err()
+				case c, ok := <-request:
+					if !ok {
+						return *new(T), errors.New("max active connections limit exceeded")
+					}
+					conn = c
 				}
 
 				// closing expired connection
